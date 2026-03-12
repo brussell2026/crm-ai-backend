@@ -1,0 +1,18 @@
+{
+  "name": "crm-ai-backend",
+  "version": "1.0.0",
+  "description": "Backend for CRM AI Reply Assistant - analyzes conversation threads via OpenAI",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.1",
+    "openai": "^6.27.0"
+  }
+}
