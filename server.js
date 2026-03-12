@@ -10,10 +10,47 @@ const app = express();
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const EXTENSION_API_KEY = process.env.EXTENSION_API_KEY;
 const JWT_SECRET = process.env.JWT_SECRET;
-const APP_USERNAME = process.env.APP_USERNAME;
-const APP_PASSWORD = process.env.APP_PASSWORD;
 const PORT = process.env.PORT || 8080;
 const DEALERSHIP_NAME = 'Hiley Chevrolet of Rockwall';
+
+/**
+ * MULTI-USER ACCOUNT LIST
+ * Replace these passwords with the real ones you want to use.
+ */
+const USERS = [
+  {
+    username: 'brussell',
+    password: 'Hileybr2026',
+    name: 'Brandon Russell',
+    role: 'admin',
+    dealership: DEALERSHIP_NAME,
+    isActive: true
+  },
+  {
+    username: 'aaleman',
+    password: 'Hileyaa2026',
+    name: 'Al Aleman',
+    role: 'sales',
+    dealership: DEALERSHIP_NAME,
+    isActive: true
+  },
+  {
+    username: 'ERichey',
+    password: 'Hileyer2026',
+    name: 'Elizabeth Richey',
+    role: 'sales',
+    dealership: DEALERSHIP_NAME,
+    isActive: true
+  },
+  {
+    username: 'user3',
+    password: 'SalesUser32026!',
+    name: 'Sales User 3',
+    role: 'sales',
+    dealership: DEALERSHIP_NAME,
+    isActive: true
+  }
+];
 
 app.use(
   cors({
@@ -41,11 +78,6 @@ if (!JWT_SECRET) {
   process.exit(1);
 }
 
-if (!APP_USERNAME || !APP_PASSWORD) {
-  console.error('❌ Missing APP_USERNAME or APP_PASSWORD in environment');
-  process.exit(1);
-}
-
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 300,
@@ -56,7 +88,7 @@ const generalLimiter = rateLimit({
 
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20,
+  max: 30,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many login attempts. Please try again later.' }
@@ -100,6 +132,7 @@ function buildMessagesTranscript(messages = []) {
       const timestamp = cleanText(m.timestamp);
       const title = cleanText(m.title);
       const text = cleanText(m.text);
+
       const extra = [
         cleanText(m.direction) ? `Direction: ${cleanText(m.direction)}` : '',
         cleanText(m.actor) ? `Actor: ${cleanText(m.actor)}` : '',
@@ -515,12 +548,14 @@ function requireExtensionApiKey(req, res, next) {
   return next();
 }
 
-function signAuthToken() {
+function signAuthToken(user) {
   return jwt.sign(
     {
-      sub: APP_USERNAME,
-      dealership: DEALERSHIP_NAME,
-      role: 'admin'
+      sub: user.username,
+      username: user.username,
+      name: user.name,
+      dealership: user.dealership,
+      role: user.role
     },
     JWT_SECRET,
     { expiresIn: '7d' }
@@ -543,6 +578,15 @@ function requireAuthToken(req, res, next) {
   } catch (error) {
     return res.status(401).json({ error: 'Invalid or expired auth token' });
   }
+}
+
+function findActiveUser(username, password) {
+  return USERS.find(
+    (user) =>
+      user.isActive &&
+      cleanText(user.username) === cleanText(username) &&
+      cleanText(user.password) === cleanText(password)
+  );
 }
 
 async function analyzeThreadWithOpenAI(payload) {
@@ -603,19 +647,22 @@ app.post('/auth/login', loginLimiter, requireExtensionApiKey, (req, res) => {
   const username = cleanText(req.body?.username);
   const password = cleanText(req.body?.password);
 
-  if (username !== APP_USERNAME || password !== APP_PASSWORD) {
+  const user = findActiveUser(username, password);
+
+  if (!user) {
     return res.status(401).json({ error: 'Invalid username or password' });
   }
 
-  const token = signAuthToken();
+  const token = signAuthToken(user);
 
   return res.json({
     ok: true,
     token,
     user: {
-      username: APP_USERNAME,
-      dealership: DEALERSHIP_NAME,
-      role: 'admin'
+      username: user.username,
+      name: user.name,
+      dealership: user.dealership,
+      role: user.role
     }
   });
 });
