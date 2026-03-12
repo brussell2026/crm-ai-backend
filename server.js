@@ -6,6 +6,7 @@ const rateLimit = require('express-rate-limit');
 const jwt = require('jsonwebtoken');
 
 const app = express();
+app.set('trust proxy', 1);
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const EXTENSION_API_KEY = process.env.EXTENSION_API_KEY;
