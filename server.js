@@ -2,19 +2,75 @@ require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 
 const express = require('express');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
+const jwt = require('jsonwebtoken');
 
 const app = express();
-app.use(cors());
-app.use(express.json({ limit: '4mb' }));
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const PORT = process.env.PORT || 3000;
+const EXTENSION_API_KEY = process.env.EXTENSION_API_KEY;
+const JWT_SECRET = process.env.JWT_SECRET;
+const APP_USERNAME = process.env.APP_USERNAME;
+const APP_PASSWORD = process.env.APP_PASSWORD;
+const PORT = process.env.PORT || 8080;
 const DEALERSHIP_NAME = 'Hiley Chevrolet of Rockwall';
 
+app.use(
+  cors({
+    origin: true,
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'x-extension-key', 'Authorization'],
+    credentials: false
+  })
+);
+
+app.use(express.json({ limit: '4mb' }));
+
 if (!OPENAI_API_KEY) {
-  console.error('❌ Missing OPENAI_API_KEY in .env');
+  console.error('❌ Missing OPENAI_API_KEY in environment');
   process.exit(1);
 }
+
+if (!EXTENSION_API_KEY) {
+  console.error('❌ Missing EXTENSION_API_KEY in environment');
+  process.exit(1);
+}
+
+if (!JWT_SECRET) {
+  console.error('❌ Missing JWT_SECRET in environment');
+  process.exit(1);
+}
+
+if (!APP_USERNAME || !APP_PASSWORD) {
+  console.error('❌ Missing APP_USERNAME or APP_PASSWORD in environment');
+  process.exit(1);
+}
+
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again later.' }
+});
+
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts. Please try again later.' }
+});
+
+const analyzeLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many analysis requests. Please slow down.' }
+});
+
+app.use(generalLimiter);
 
 function cleanText(value) {
   if (value === null || value === undefined) return '';
@@ -49,12 +105,12 @@ function buildMessagesTranscript(messages = []) {
         cleanText(m.actor) ? `Actor: ${cleanText(m.actor)}` : '',
         cleanText(m.counterparty) ? `Counterparty: ${cleanText(m.counterparty)}` : '',
         title ? `Type: ${title}` : ''
-      ].filter(Boolean).join(' | ');
+      ]
+        .filter(Boolean)
+        .join(' | ');
 
       const prefix = timestamp ? `[${timestamp}] ` : '';
-      return extra
-        ? `${prefix}${sender}: ${text} (${extra})`
-        : `${prefix}${sender}: ${text}`;
+      return extra ? `${prefix}${sender}: ${text} (${extra})` : `${prefix}${sender}: ${text}`;
     })
     .join('\n');
 }
@@ -183,8 +239,8 @@ REPLY STYLE
 
 Return three reply options:
 
-soft → friendly / conversational  
-direct → confident / efficient  
+soft → friendly / conversational
+direct → confident / efficient
 appointment_close → moves toward visit or next step
 
 Replies should be short and text-message friendly.
@@ -243,20 +299,24 @@ BUYER / CO-BUYER:
 ${JSON.stringify(buyerInfo, null, 2)}
 
 HISTORY SUMMARY:
-${JSON.stringify({
-    total_items: history.total_items,
-    text_count: history.text_count,
-    inbound_text_count: history.inbound_text_count,
-    outbound_text_count: history.outbound_text_count,
-    call_count: history.call_count,
-    inbound_call_count: history.inbound_call_count,
-    outbound_call_count: history.outbound_call_count,
-    note_count: history.note_count,
-    latest_activity_at: history.latest_activity_at,
-    latest_customer_message_at: history.latest_customer_message_at,
-    latest_salesperson_message_at: history.latest_salesperson_message_at,
-    latest_text_direction: history.latest_text_direction
-  }, null, 2)}
+${JSON.stringify(
+    {
+      total_items: history.total_items,
+      text_count: history.text_count,
+      inbound_text_count: history.inbound_text_count,
+      outbound_text_count: history.outbound_text_count,
+      call_count: history.call_count,
+      inbound_call_count: history.inbound_call_count,
+      outbound_call_count: history.outbound_call_count,
+      note_count: history.note_count,
+      latest_activity_at: history.latest_activity_at,
+      latest_customer_message_at: history.latest_customer_message_at,
+      latest_salesperson_message_at: history.latest_salesperson_message_at,
+      latest_text_direction: history.latest_text_direction
+    },
+    null,
+    2
+  )}
 
 RECENT NOTES:
 ${buildRecentHistory(history)}
@@ -273,9 +333,9 @@ function buildFallbackResponse(payload = {}) {
   const lead = payload.lead || {};
   const vehicle = payload.vehicle_interest || {};
   const customerName = cleanText(lead.customer_name || 'the customer');
-  const vehicleName = cleanText(
-    [vehicle.year, vehicle.make, vehicle.model, vehicle.trim].filter(Boolean).join(' ')
-  ) || cleanText(vehicle.raw_title || 'the vehicle');
+  const vehicleName =
+    cleanText([vehicle.year, vehicle.make, vehicle.model, vehicle.trim].filter(Boolean).join(' ')) ||
+    cleanText(vehicle.raw_title || 'the vehicle');
 
   return {
     customer_summary: `${customerName} is an active lead with recent communication history. AI fallback was used because the main analysis failed.`,
@@ -285,10 +345,7 @@ function buildFallbackResponse(payload = {}) {
       vehicleName ? `Interested in ${vehicleName}` : 'Vehicle interest present',
       'Recent communication history exists'
     ],
-    missing_info: [
-      'Exact appointment commitment',
-      'Any additional trade / finance details'
-    ],
+    missing_info: ['Exact appointment commitment', 'Any additional trade / finance details'],
     strategy: 'Answer the customer directly, keep the tone natural, and move toward a clear next step.',
     next_best_action: 'Answer the latest customer question directly',
     why_this_action: 'The lead is engaged and the latest customer question should be handled first.',
@@ -352,8 +409,12 @@ function normalizeAiResult(data, payload = {}) {
     customer_summary: cleanText(data?.customer_summary) || fallback.customer_summary,
     buyer_type: cleanText(data?.buyer_type) || fallback.buyer_type,
     deal_stage: cleanText(data?.deal_stage) || fallback.deal_stage,
-    hot_points: normalizeArray(data?.hot_points, 6).length ? normalizeArray(data?.hot_points, 6) : fallback.hot_points,
-    missing_info: normalizeArray(data?.missing_info, 6).length ? normalizeArray(data?.missing_info, 6) : fallback.missing_info,
+    hot_points: normalizeArray(data?.hot_points, 6).length
+      ? normalizeArray(data?.hot_points, 6)
+      : fallback.hot_points,
+    missing_info: normalizeArray(data?.missing_info, 6).length
+      ? normalizeArray(data?.missing_info, 6)
+      : fallback.missing_info,
     strategy: cleanText(data?.strategy) || fallback.strategy,
     next_best_action: cleanText(data?.next_best_action) || fallback.next_best_action,
     why_this_action: cleanText(data?.why_this_action) || fallback.why_this_action,
@@ -444,6 +505,46 @@ function applyHardRules(aiResult, payload = {}) {
   return aiResult;
 }
 
+function requireExtensionApiKey(req, res, next) {
+  const incomingKey = cleanText(req.headers['x-extension-key']);
+
+  if (!incomingKey || incomingKey !== EXTENSION_API_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  return next();
+}
+
+function signAuthToken() {
+  return jwt.sign(
+    {
+      sub: APP_USERNAME,
+      dealership: DEALERSHIP_NAME,
+      role: 'admin'
+    },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+}
+
+function requireAuthToken(req, res, next) {
+  const authHeader = cleanText(req.headers.authorization);
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing auth token' });
+  }
+
+  const token = authHeader.slice(7).trim();
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    return next();
+  } catch (error) {
+    return res.status(401).json({ error: 'Invalid or expired auth token' });
+  }
+}
+
 async function analyzeThreadWithOpenAI(payload) {
   const prompt = buildPrompt(payload);
 
@@ -487,11 +588,39 @@ async function analyzeThreadWithOpenAI(payload) {
   return applyHardRules(normalized, payload);
 }
 
+app.get('/', (req, res) => {
+  res.json({
+    ok: true,
+    service: 'crm-ai-backend'
+  });
+});
+
 app.get('/health', (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/analyze-thread', async (req, res) => {
+app.post('/auth/login', loginLimiter, requireExtensionApiKey, (req, res) => {
+  const username = cleanText(req.body?.username);
+  const password = cleanText(req.body?.password);
+
+  if (username !== APP_USERNAME || password !== APP_PASSWORD) {
+    return res.status(401).json({ error: 'Invalid username or password' });
+  }
+
+  const token = signAuthToken();
+
+  return res.json({
+    ok: true,
+    token,
+    user: {
+      username: APP_USERNAME,
+      dealership: DEALERSHIP_NAME,
+      role: 'admin'
+    }
+  });
+});
+
+app.post('/analyze-thread', analyzeLimiter, requireExtensionApiKey, requireAuthToken, async (req, res) => {
   try {
     const payload = req.body || {};
     const result = await analyzeThreadWithOpenAI(payload);
