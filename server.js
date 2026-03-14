@@ -96,7 +96,6 @@ function cleanJsonText(text) {
 
   if (!cleaned) return '';
 
-  // Remove markdown code fences if the model wraps JSON.
   cleaned = cleaned.replace(/```json/gi, '```');
   if (cleaned.startsWith('```')) {
     cleaned = cleaned.replace(/^```/, '');
@@ -116,7 +115,6 @@ function parseAnalysisJson(text) {
   try {
     return JSON.parse(cleaned);
   } catch (err) {
-    // Try to pull the first JSON object from the text
     const match = cleaned.match(/\{[\s\S]*\}/);
     if (match) {
       return JSON.parse(match[0]);
@@ -127,38 +125,55 @@ function parseAnalysisJson(text) {
 
 function buildSystemPrompt() {
   return `
-You are an elite automotive sales assistant for ${DEALERSHIP_NAME}.
+You are an elite automotive sales strategist and sales manager coach for ${DEALERSHIP_NAME}.
 
-Your job is to help dealership staff send strong, natural, persuasive text replies that:
-- move the deal forward
-- create engagement
-- answer the customer's actual question
-- avoid weak, robotic, needy, or repetitive follow-up language
-- sound confident, human, and professional
-- help set appointments when appropriate
-- keep momentum without sounding pushy
+Your job is to analyze the full lead context and tell the salesperson exactly what should happen next to move the deal forward.
+You are not just writing text replies. You are deciding the best next move based on:
+- text history
+- email history
+- call history
+- tasks and notes
+- objections
+- trade / payoff / pricing context
+- vehicle information
+- appointment opportunity
+- the customer's tone, urgency, and buying signals
 
 Store information:
 - Dealership: ${DEALERSHIP_NAME}
 - Store hours: ${STORE_HOURS}
 
+Core goals:
+- move the deal forward
+- create engagement
+- get the customer in the door when appropriate
+- avoid weak, robotic, needy, repetitive follow-up language
+- sound confident, human, and professional
+- coach the salesperson on what to do next
+
 Rules:
-1. Always pay close attention to the customer's latest message.
-2. Do not ignore their actual question.
-3. Do not recommend "just checking in" style language.
+1. Always pay close attention to the customer's latest message and the full history provided.
+2. Do not ignore the customer's actual question or stated obstacle.
+3. Do not recommend “just checking in” language.
 4. If there is no conversation yet, suggest a strong opening text.
-5. If the customer asks location or where the dealership is, mention the dealership name and tell the salesperson to send the store location/map link if available in the CRM.
-6. If the conversation is in Spanish, return the recommended reply in Spanish.
-7. If the conversation is in English, return the recommended reply in English.
-8. Recommended reply should be concise, conversational, and ready to send.
+5. If the customer asks where the dealership is, mention the dealership name and tell the salesperson to send the store location/map link if available in the CRM.
+6. If the conversation is in Spanish, return the suggested replies in Spanish.
+7. If the conversation is in English, return the suggested replies in English.
+8. Suggested replies must be concise, conversational, ready to send, and aligned with the best next action.
 9. Do not use cheesy sales language.
-10. If an appointment ask makes sense, include it naturally.
-11. Use any lead memory provided to stay consistent with past objections, preferences, trade info, payment goals, vehicle of interest, timeline, and next step.
+10. If the best next action is CALL or EMAIL, still provide 3 short text options that support that next move when possible.
+11. Use the lead memory to stay consistent with objections, preferences, trade info, payment goals, vehicle of interest, timeline, and next steps.
+12. “Best Next Action” must explicitly state the best contact method next: CALL, TEXT, EMAIL, or WAIT.
+13. “Strategy” must be salesperson coaching, not customer-facing copy. It should explain how to get the customer closer to an appointment or commitment.
+14. If the provided vehicle info is weak or incomplete, infer what you can from the history and lead details, but do not invent specifics.
 
 Return ONLY valid JSON with this exact shape:
 {
   "buyer_type": "string",
   "deal_stage": "string",
+  "best_next_action": "string",
+  "next_step_channel": "CALL or TEXT or EMAIL or WAIT",
+  "next_step_reason": "string",
   "strategy": "string",
   "recommended_reply": "string",
   "recommended_reply_2": "string",
@@ -184,14 +199,18 @@ function buildUserPrompt({
 }) {
   const conversation = formatConversation(messages);
   const lastCustomerMessage = extractLastCustomerMessage(messages);
+  const normalizedVehicleInfo = safeString(vehicleInfo) || 'Unknown';
+  const normalizedLeadDetails = safeString(leadDetails) || 'None provided';
 
   return `
-Analyze this dealership text conversation and recommend the best next replies.
+Analyze this dealership lead and recommend the strongest next move.
 
 Customer name: ${safeString(customerName) || 'Unknown'}
 Salesperson name: ${safeString(salespersonName) || 'Unknown'}
-Vehicle info: ${safeString(vehicleInfo) || 'Unknown'}
-Lead details: ${safeString(leadDetails) || 'None provided'}
+Vehicle info: ${normalizedVehicleInfo}
+Lead details, history, notes, tasks, call/email/text context:
+${normalizedLeadDetails}
+
 Existing lead memory summary: ${safeString(leadMemory.summary) || 'None'}
 Existing lead memory notes:
 ${
@@ -206,6 +225,9 @@ ${lastCustomerMessage || 'No customer message yet.'}
 Conversation:
 ${conversation}
 
+Think like a sharp desk manager / internet director.
+Decide the actual best next move: should the salesperson CALL, TEXT, EMAIL, or WAIT?
+Then coach the salesperson on how to move the customer toward the store visit, firm next step, or stronger commitment.
 Return only valid JSON.
 `.trim();
 }
@@ -345,6 +367,9 @@ app.post('/analyze-thread', async (req, res) => {
     const result = {
       buyer_type: safeString(analysis.buyer_type) || 'Unknown',
       deal_stage: safeString(analysis.deal_stage) || 'Unknown',
+      best_next_action: safeString(analysis.best_next_action) || '',
+      next_step_channel: safeString(analysis.next_step_channel).toUpperCase() || '',
+      next_step_reason: safeString(analysis.next_step_reason) || '',
       strategy: safeString(analysis.strategy) || '',
       recommended_reply: safeString(analysis.recommended_reply) || '',
       recommended_reply_2: safeString(analysis.recommended_reply_2) || '',
