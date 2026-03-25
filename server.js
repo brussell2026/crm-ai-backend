@@ -124,56 +124,6 @@ function parseAnalysisJson(text) {
   }
 }
 
-const ANALYSIS_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: [
-    'buyer_type',
-    'deal_stage',
-    'best_next_action',
-    'next_step_channel',
-    'next_step_reason',
-    'strategy',
-    'recommended_reply',
-    'recommended_reply_2',
-    'recommended_reply_3',
-    'conversation_language',
-    'customer_sentiment',
-    'hot_points',
-    'objections',
-    'appointment_opportunity',
-    'memory_summary',
-    'memory_updates',
-  ],
-  properties: {
-    buyer_type: { type: 'string' },
-    deal_stage: { type: 'string' },
-    best_next_action: { type: 'string' },
-    next_step_channel: { type: 'string' },
-    next_step_reason: { type: 'string' },
-    strategy: { type: 'string' },
-    recommended_reply: { type: 'string' },
-    recommended_reply_2: { type: 'string' },
-    recommended_reply_3: { type: 'string' },
-    conversation_language: { type: 'string' },
-    customer_sentiment: { type: 'string' },
-    hot_points: {
-      type: 'array',
-      items: { type: 'string' },
-    },
-    objections: {
-      type: 'array',
-      items: { type: 'string' },
-    },
-    appointment_opportunity: { type: 'boolean' },
-    memory_summary: { type: 'string' },
-    memory_updates: {
-      type: 'array',
-      items: { type: 'string' },
-    },
-  },
-};
-
 function buildSystemPrompt() {
   return `
 You are an elite automotive sales strategist and sales manager coach for ${DEALERSHIP_NAME}.
@@ -398,21 +348,16 @@ app.post('/analyze-thread', async (req, res) => {
       leadMemory: existingMemory,
     });
 
-    const response = await openai.responses.create({
+    const response = await openai.chat.completions.create({
       model: OPENAI_MODEL,
-      instructions: systemPrompt,
-      input: userPrompt,
-      text: {
-        format: {
-          type: 'json_schema',
-          name: 'lead_analysis',
-          schema: ANALYSIS_SCHEMA,
-          strict: true,
-        },
-      },
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      response_format: { type: 'json_object' },
     });
 
-    const rawText = safeString(response.output_text);
+    const rawText = safeString(response.choices?.[0]?.message?.content);
     const analysis = parseAnalysisJson(rawText);
 
     const result = {
@@ -447,8 +392,9 @@ app.post('/analyze-thread', async (req, res) => {
   } catch (error) {
     console.error('Analyze thread error:', error);
 
-    return res.status(500).json({
+    return res.status(error.status || 500).json({
       error: 'Failed to analyze thread.',
+      message: error.message || 'Unknown error',
       details: error.message || 'Unknown error',
     });
   }
