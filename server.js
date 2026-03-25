@@ -258,6 +258,127 @@ function mergeLeadMemory(existingMemory, analysis) {
   };
 }
 
+function detectConversationLanguage(messages, leadDetails) {
+  const haystack = `${formatConversation(messages)}\n${safeString(leadDetails)}`.toLowerCase();
+  return /\b(hola|gracias|quiero|precio|camioneta|si|sí|puedo|hablar)\b/.test(haystack)
+    ? 'Spanish'
+    : 'English';
+}
+
+function buildFallbackReplies(lastCustomerMessage, customerName) {
+  const name = safeString(customerName).split(/\s+/)[0] || 'there';
+  const last = safeString(lastCustomerMessage).toLowerCase();
+
+  if (!last) {
+    return [
+      `Hi ${name}, this is Brandon with Hiley Chevrolet of Rockwall. What questions can I answer for you on the vehicle?`,
+      `Hi ${name}, I can help with pricing, availability, or trade details. What would you like to go over first?`,
+      `Hi ${name}, I’m here to help with the next step on your vehicle search. Are you looking at one specific truck?`,
+    ];
+  }
+
+  if (/\bprice|priced|32000|payment|payments|otd|out the door|difference\b/.test(last)) {
+    return [
+      `I can help with that. Are you talking about the red truck on the website at 32000?`,
+      `Got it. If we're talking about that red truck, do you want me to confirm the exact numbers on that one?`,
+      `I can narrow that down for you. Are you wanting the website truck at 32000 or a different one?`,
+    ];
+  }
+
+  if (/\bavailable|still there|in stock\b/.test(last)) {
+    return [
+      `Yes, it looks available right now. Do you want to come see it today or would you like me to confirm details first?`,
+      `It appears available. Are you looking to buy soon or still comparing a few options?`,
+      `Yes, it should still be available. Want me to confirm the exact truck you're looking at?`,
+    ];
+  }
+
+  if (/\bcall|talk|phone\b/.test(last)) {
+    return [
+      `I can do that. What’s the best number to reach you on right now?`,
+      `Yes, I can call. Are you free now or in a few minutes?`,
+      `I’m available to talk. Let me know the best number and time.`,
+    ];
+  }
+
+  return [
+    `I got you. What’s the main thing you want to lock down next so I can help move this forward?`,
+    `That makes sense. What’s the biggest question you want answered first?`,
+    `I can help with that. Are you wanting pricing, availability, or the next step on the truck?`,
+  ];
+}
+
+function buildFallbackAnalysis({
+  messages,
+  customerName,
+  leadDetails,
+  vehicleInfo,
+  existingMemory,
+}) {
+  const lastCustomerMessage = extractLastCustomerMessage(messages);
+  const language = detectConversationLanguage(messages, leadDetails);
+  const replies = buildFallbackReplies(lastCustomerMessage, customerName);
+  const hasRecentCustomerMessage = !!safeString(lastCustomerMessage);
+  const vehicleSummary = safeString(vehicleInfo) || 'Vehicle details are limited.';
+  const memorySummary =
+    safeString(existingMemory.summary) ||
+    `Fallback analysis used because OpenAI quota is currently unavailable. Vehicle: ${vehicleSummary}`;
+
+  return {
+    buyer_type: hasRecentCustomerMessage ? 'Active shopper' : 'New inquiry',
+    deal_stage: hasRecentCustomerMessage ? 'Conversation in progress' : 'Initial contact',
+    best_next_action: hasRecentCustomerMessage
+      ? 'TEXT the customer back with a clarifying question tied to the exact vehicle or numbers they mentioned.'
+      : 'TEXT the customer with a strong opening message and identify the exact vehicle of interest.',
+    next_step_channel: 'TEXT',
+    next_step_reason:
+      'OpenAI quota is unavailable, so a local fallback is guiding the next step based on the latest visible conversation.',
+    strategy:
+      'Acknowledge the customer’s point, tighten the conversation around the exact truck or number they mentioned, and avoid broad back-and-forth until the vehicle and ask are confirmed.',
+    recommended_reply: replies[0],
+    recommended_reply_2: replies[1],
+    recommended_reply_3: replies[2],
+    conversation_language: language,
+    customer_sentiment: hasRecentCustomerMessage ? 'Engaged' : 'Unknown',
+    hot_points: uniqueFallbackItems([
+      safeString(lastCustomerMessage) ? `Latest customer message: ${safeString(lastCustomerMessage)}` : '',
+      safeString(vehicleInfo) ? `Vehicle context: ${safeString(vehicleInfo)}` : '',
+    ]),
+    objections: uniqueFallbackItems([
+      /\bprice|payment|otd|difference\b/i.test(lastCustomerMessage) ? 'Price/payment concern' : '',
+    ]),
+    appointment_opportunity: /\btoday|come in|available\b/i.test(lastCustomerMessage),
+    memory_summary: memorySummary,
+    memory_updates: uniqueFallbackItems([
+      safeString(lastCustomerMessage) ? `Latest customer message: ${safeString(lastCustomerMessage)}` : '',
+      'Fallback analysis used because OpenAI quota was exceeded.',
+    ]),
+    fallback_used: true,
+  };
+}
+
+function uniqueFallbackItems(items) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const text = safeString(item);
+    if (!text) return false;
+    const key = text.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function isQuotaError(error) {
+  const message = safeString(error?.message).toLowerCase();
+  return (
+    Number(error?.status) === 429 ||
+    message.includes('quota') ||
+    message.includes('billing') ||
+    message.includes('rate limit')
+  );
+}
+
 app.get('/health', (req, res) => {
   res.json({
     ok: true,
@@ -322,22 +443,21 @@ app.delete('/lead-memory/:leadId', (req, res) => {
 });
 
 app.post('/analyze-thread', async (req, res) => {
+  const messages = normalizeMessages(req.body.messages);
+  const leadId = safeString(req.body.leadId);
+  const customerName = safeString(req.body.customerName);
+  const salespersonName = safeString(req.body.salespersonName);
+  const vehicleInfo =
+    typeof req.body.vehicleInfo === 'object'
+      ? JSON.stringify(req.body.vehicleInfo)
+      : safeString(req.body.vehicleInfo);
+  const leadDetails =
+    typeof req.body.leadDetails === 'object'
+      ? JSON.stringify(req.body.leadDetails)
+      : safeString(req.body.leadDetails);
+  const existingMemory = getLeadMemory(leadId);
+
   try {
-    const messages = normalizeMessages(req.body.messages);
-    const leadId = safeString(req.body.leadId);
-    const customerName = safeString(req.body.customerName);
-    const salespersonName = safeString(req.body.salespersonName);
-    const vehicleInfo =
-      typeof req.body.vehicleInfo === 'object'
-        ? JSON.stringify(req.body.vehicleInfo)
-        : safeString(req.body.vehicleInfo);
-    const leadDetails =
-      typeof req.body.leadDetails === 'object'
-        ? JSON.stringify(req.body.leadDetails)
-        : safeString(req.body.leadDetails);
-
-    const existingMemory = getLeadMemory(leadId);
-
     const systemPrompt = buildSystemPrompt();
     const userPrompt = buildUserPrompt({
       messages,
@@ -391,6 +511,24 @@ app.post('/analyze-thread', async (req, res) => {
     return res.json(result);
   } catch (error) {
     console.error('Analyze thread error:', error);
+
+    if (isQuotaError(error)) {
+      const fallbackResult = buildFallbackAnalysis({
+        messages,
+        customerName,
+        leadDetails,
+        vehicleInfo,
+        existingMemory,
+      });
+
+      if (leadId) {
+        const mergedMemory = mergeLeadMemory(existingMemory, fallbackResult);
+        setLeadMemory(leadId, mergedMemory);
+        fallbackResult.lead_memory = mergedMemory;
+      }
+
+      return res.json(fallbackResult);
+    }
 
     return res.status(error.status || 500).json({
       error: 'Failed to analyze thread.',
