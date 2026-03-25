@@ -13,7 +13,7 @@ const {
 const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '4mb' }));
 
 const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -38,6 +38,33 @@ const leadMemoryStore = new Map();
 function safeString(value) {
   if (value === null || value === undefined) return '';
   return String(value).trim();
+}
+
+function safeArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function uniqueStrings(values) {
+  const seen = new Set();
+  const out = [];
+  for (const value of safeArray(values)) {
+    const text = safeString(value);
+    const key = text.toLowerCase();
+    if (!text || seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+  }
+  return out;
+}
+
+function stringifyForPrompt(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return safeString(value);
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return safeString(value);
+  }
 }
 
 function normalizeMessages(messages) {
@@ -397,8 +424,149 @@ function isQuotaError(error) {
   );
 }
 
+function getSnapshotEvents(snapshotInput = {}) {
+  return safeArray(snapshotInput.events || snapshotInput.network_events).map((event) => ({
+    method: safeString(event.method || 'GET'),
+    url: safeString(event.url),
+    path: safeString(event.path),
+    status: safeString(event.status),
+    content_type: safeString(event.content_type || event.contentType),
+    body_snippet: safeString(event.body_snippet || event.bodySnippet || event.body),
+    request_body_snippet: safeString(
+      event.request_body_snippet || event.requestBodySnippet || event.requestBody
+    ),
+    captured_at: safeString(event.captured_at || event.capturedAt),
+  }));
+}
+
+function snapshotEventText(event) {
+  return [event.url, event.path, event.body_snippet, event.request_body_snippet]
+    .map((value) => safeString(value))
+    .filter(Boolean)
+    .join('\n');
+}
+
+function buildSnapshotVehicleCandidates(events = []) {
+  const makePattern =
+    /\b(Chevrolet|Ford|GMC|Buick|Cadillac|Toyota|Honda|Nissan|Jeep|Ram|Dodge|Hyundai|Kia|Subaru|Volkswagen|BMW|Mercedes|Audi|Lexus|Mazda|Chrysler|Lincoln|Volvo|Porsche|Acura|Infiniti|Mitsubishi)\b/i;
+  const typePattern =
+    /\b(Trax|Traverse|Tahoe|Suburban|Silverado|Colorado|Blazer|Equinox|Explorer|Expedition|Camry|Corolla|Civic|Accord|Ranger|Sierra|F-150|2500HD|1500|SUV|Pickup|Sport Utility)\b/i;
+  const candidates = [];
+
+  for (const event of safeArray(events)) {
+    const lines = uniqueStrings(
+      [event.body_snippet, event.request_body_snippet]
+        .filter(Boolean)
+        .flatMap((text) => String(text).split(/\n|\|/))
+        .map((line) => safeString(line))
+        .filter(Boolean)
+    );
+
+    for (const line of lines) {
+      if (!/\b(?:19|20)\d{2}\b/.test(line)) continue;
+      if (!makePattern.test(line) && !typePattern.test(line)) continue;
+
+      let score = 0;
+      if (makePattern.test(line)) score += 4;
+      if (typePattern.test(line)) score += 2;
+      if (/\bvehicle info\b/i.test(event.body_snippet || '')) score += 5;
+      if (/\bactive\b/i.test(line) || /\bactive\b/i.test(event.body_snippet || '')) score += 4;
+      if (/\blost|duplicate|sold|delivered\b/i.test(line)) score -= 4;
+      if (/\bstock|vin|color|location|pickup|sport utility|crew cab|lt|premier|custom\b/i.test(line)) score += 2;
+      if (/CustomerDashboard|CarDashboard|vinconnect/i.test(event.url) || /CustomerDashboard|CarDashboard|vinconnect/i.test(event.path)) score += 2;
+
+      candidates.push({
+        line: line.slice(0, 240),
+        score,
+      });
+    }
+  }
+
+  return candidates
+    .sort((a, b) => b.score - a.score)
+    .filter((candidate, index, array) =>
+      array.findIndex((item) => item.line.toLowerCase() === candidate.line.toLowerCase()) === index
+    );
+}
+
+function extractSnapshotLeadState(snapshotInput = {}) {
+  const events = getSnapshotEvents(snapshotInput);
+  const combinedText = events.map(snapshotEventText).join('\n');
+  const vehicleCandidates = buildSnapshotVehicleCandidates(events);
+  const topVehicle = safeString(vehicleCandidates[0]?.line);
+  const leadSource =
+    safeString(
+      (combinedText.match(
+        /\b(?:Di\s*-\s*[A-Za-z0-9 .-]+|700Credit\.Com|Cargurus|Cars\.com|Carfax, Inc|AutoTrader\.com|Dealers?\s+WebSite|Wholesale|Internet|Phone|Walk In|GM 3rd Party|Social\s*-\s*Facebook\/Instagram\/Etc)\b/i
+      ) || [])[0]
+    ) || '';
+  const status =
+    safeString(
+      (combinedText.match(
+        /\b(Waiting for Prospect Response|Waiting for response|Active|Duplicate|Sold|Lost|Bad|Delivered|New Lead)\b/i
+      ) || [])[0]
+    ) || '';
+  const contacted =
+    safeString((combinedText.match(/\bContacted\s*:\s*(Yes|No[^\n]*)/i) || [])[1]) ||
+    (/recent text\/call activity detected|text conversation/i.test(combinedText) ? 'Yes' : '');
+  const attempted =
+    safeString((combinedText.match(/\bAttempted\s*:\s*([^\n]+)/i) || [])[1]) || '';
+  const phoneCallDetected = /phone call|voicemail|no contact/i.test(combinedText);
+  const textDetected = /text message|sms|reply received/i.test(combinedText);
+
+  return {
+    vehicles: {
+      primary: {
+        summary: topVehicle,
+      },
+      discussed: vehicleCandidates.slice(1, 5).map((candidate) => candidate.line),
+      historical: vehicleCandidates.slice(0, 8).map((candidate) => candidate.line),
+    },
+    source: {
+      lead_source: leadSource,
+    },
+    lifecycle: {
+      status,
+      contacted,
+      attempted,
+    },
+    communications: {
+      channels_used: uniqueStrings([
+        textDetected ? 'TEXT' : '',
+        phoneCallDetected ? 'CALL' : '',
+      ]),
+      calls: phoneCallDetected ? ['CRM snapshot detected phone call history'] : [],
+      texts: textDetected ? ['CRM snapshot detected text history'] : [],
+      notes: events
+        .filter((event) => safeString(event.body_snippet))
+        .slice(0, 10)
+        .map((event) =>
+          [safeString(event.method), safeString(event.status), safeString(event.path || event.url)]
+            .filter(Boolean)
+            .join(' ')
+        ),
+    },
+    opportunity: {
+      risk_flags: uniqueStrings([
+        !events.length ? 'No CRM snapshot events captured' : '',
+        !topVehicle && events.length ? 'CRM snapshot missing primary vehicle' : '',
+      ]),
+    },
+    meta: {
+      captured_from: events.length ? ['crm-snapshot'] : [],
+      data_quality: events.some((event) => safeString(event.body_snippet)) ? 'high' : events.length ? 'medium' : '',
+    },
+    snapshot: {
+      event_count: events.length,
+      vehicle_candidates: vehicleCandidates.slice(0, 6),
+    },
+  };
+}
+
 function coerceLeadStateFromRequest(body = {}) {
   const incomingLeadState = body.leadState || body.lead_state || {};
+  const incomingSnapshot = body.crmSnapshot || body.crm_snapshot || {};
+  const snapshotState = extractSnapshotLeadState(incomingSnapshot);
   const normalizedMessages = normalizeMessages(
     incomingLeadState.communications?.messages || body.messages
   );
@@ -434,38 +602,81 @@ function coerceLeadStateFromRequest(body = {}) {
     },
     lifecycle: {
       ...(incomingLeadState.lifecycle || {}),
+      ...(snapshotState.lifecycle || {}),
       status:
         safeString(incomingLeadState.lifecycle?.status) ||
+        safeString(snapshotState.lifecycle?.status) ||
         safeString(body.statusValue || body.status),
       process:
         safeString(incomingLeadState.lifecycle?.process) ||
         safeString(body.processValue || body.process),
     },
+    source: {
+      ...(incomingLeadState.source || {}),
+      ...(snapshotState.source || {}),
+      lead_source:
+        safeString(incomingLeadState.source?.lead_source) ||
+        safeString(snapshotState.source?.lead_source) ||
+        safeString(body.leadSource || body.lead_source),
+    },
     vehicles: {
       ...(incomingLeadState.vehicles || {}),
+      ...(snapshotState.vehicles || {}),
       primary: {
         ...(incomingLeadState.vehicles?.primary || {}),
+        ...(snapshotState.vehicles?.primary || {}),
         summary:
+          safeString(snapshotState.vehicles?.primary?.summary) ||
           safeString(incomingLeadState.vehicles?.primary?.summary) ||
           safeString(body.vehicleInfo || body.vehicleSummary),
       },
     },
     communications: {
       ...(incomingLeadState.communications || {}),
+      ...(snapshotState.communications || {}),
+      channels_used: uniqueStrings([
+        ...(safeArray(incomingLeadState.communications?.channels_used)),
+        ...(safeArray(snapshotState.communications?.channels_used)),
+      ]),
       messages: normalizedMessages,
+      notes: uniqueStrings([
+        ...(safeArray(incomingLeadState.communications?.notes)),
+        ...(safeArray(snapshotState.communications?.notes)),
+      ]),
+      calls: uniqueStrings([
+        ...(safeArray(incomingLeadState.communications?.calls)),
+        ...(safeArray(snapshotState.communications?.calls)),
+      ]),
+      texts: uniqueStrings([
+        ...(safeArray(incomingLeadState.communications?.texts)),
+        ...(safeArray(snapshotState.communications?.texts)),
+      ]),
       last_customer_message:
         safeString(incomingLeadState.communications?.last_customer_message) ||
         extractLastCustomerMessage(normalizedMessages),
     },
+    opportunity: {
+      ...(incomingLeadState.opportunity || {}),
+      ...(snapshotState.opportunity || {}),
+      risk_flags: uniqueStrings([
+        ...(safeArray(incomingLeadState.opportunity?.risk_flags)),
+        ...(safeArray(snapshotState.opportunity?.risk_flags)),
+      ]),
+    },
     meta: {
       ...(incomingLeadState.meta || {}),
-      captured_from: Array.isArray(incomingLeadState.meta?.captured_from)
-        ? incomingLeadState.meta.captured_from
-        : ['extension'],
+      ...(snapshotState.meta || {}),
+      captured_from: uniqueStrings([
+        ...(Array.isArray(incomingLeadState.meta?.captured_from)
+          ? incomingLeadState.meta.captured_from
+          : ['extension']),
+        ...(safeArray(snapshotState.meta?.captured_from)),
+      ]),
       captured_at:
         safeString(incomingLeadState.meta?.captured_at) ||
         new Date().toISOString(),
       data_quality:
+        safeString(snapshotState.meta?.data_quality) ||
         safeString(incomingLeadState.meta?.data_quality) ||
         (safeString(body.leadDetails) ? 'mixed' : ''),
     },
@@ -546,7 +757,7 @@ ${
 }
 
 Supplemental raw lead details:
-${safeString(supplementalLeadDetails) || 'None'}
+${stringifyForPrompt(supplementalLeadDetails) || 'None'}
 
 Conversation:
 ${conversation}
@@ -834,6 +1045,7 @@ app.post('/v2/analyze-lead', async (req, res) => {
             typeof req.body.vehicleInfo === 'object'
               ? req.body.vehicleInfo
               : safeString(req.body.vehicleInfo),
+          crm_snapshot: req.body.crmSnapshot || req.body.crm_snapshot || null,
           status: safeString(req.body.statusValue || req.body.status),
           process: safeString(req.body.processValue || req.body.process),
           customer_name: safeString(req.body.customerName || leadState.customer?.name),
