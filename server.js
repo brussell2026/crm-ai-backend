@@ -3,6 +3,12 @@ require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const express = require('express');
 const cors = require('cors');
 const OpenAI = require('openai');
+const {
+  normalizeLeadState,
+  summarizeLeadState,
+  normalizeCoachingPlan,
+  deriveRuleSignals,
+} = require('./v2');
 
 const app = express();
 
@@ -391,6 +397,265 @@ function isQuotaError(error) {
   );
 }
 
+function coerceLeadStateFromRequest(body = {}) {
+  const incomingLeadState = body.leadState || body.lead_state || {};
+  const normalizedMessages = normalizeMessages(
+    incomingLeadState.communications?.messages || body.messages
+  );
+
+  return normalizeLeadState({
+    ...incomingLeadState,
+    ids: {
+      ...(incomingLeadState.ids || {}),
+      lead_id:
+        safeString(incomingLeadState.ids?.lead_id) ||
+        safeString(body.leadId || body.lead_id),
+    },
+    customer: {
+      ...(incomingLeadState.customer || {}),
+      name:
+        safeString(incomingLeadState.customer?.name) ||
+        safeString(body.customerName || body.customer_name),
+      phone:
+        safeString(incomingLeadState.customer?.phone) ||
+        safeString(body.phone),
+      email:
+        safeString(incomingLeadState.customer?.email) ||
+        safeString(body.email),
+      zip:
+        safeString(incomingLeadState.customer?.zip) ||
+        safeString(body.zip),
+    },
+    assignment: {
+      ...(incomingLeadState.assignment || {}),
+      salesperson:
+        safeString(incomingLeadState.assignment?.salesperson) ||
+        safeString(body.salespersonName || body.salesperson_name),
+    },
+    lifecycle: {
+      ...(incomingLeadState.lifecycle || {}),
+      status:
+        safeString(incomingLeadState.lifecycle?.status) ||
+        safeString(body.statusValue || body.status),
+      process:
+        safeString(incomingLeadState.lifecycle?.process) ||
+        safeString(body.processValue || body.process),
+    },
+    vehicles: {
+      ...(incomingLeadState.vehicles || {}),
+      primary: {
+        ...(incomingLeadState.vehicles?.primary || {}),
+        summary:
+          safeString(incomingLeadState.vehicles?.primary?.summary) ||
+          safeString(body.vehicleInfo || body.vehicleSummary),
+      },
+    },
+    communications: {
+      ...(incomingLeadState.communications || {}),
+      messages: normalizedMessages,
+      last_customer_message:
+        safeString(incomingLeadState.communications?.last_customer_message) ||
+        extractLastCustomerMessage(normalizedMessages),
+    },
+    meta: {
+      ...(incomingLeadState.meta || {}),
+      captured_from: Array.isArray(incomingLeadState.meta?.captured_from)
+        ? incomingLeadState.meta.captured_from
+        : ['extension'],
+      captured_at:
+        safeString(incomingLeadState.meta?.captured_at) ||
+        new Date().toISOString(),
+      data_quality:
+        safeString(incomingLeadState.meta?.data_quality) ||
+        (safeString(body.leadDetails) ? 'mixed' : ''),
+    },
+  });
+}
+
+function buildV2SystemPrompt() {
+  return `
+You are LeadTorque, an elite automotive sales manager coach for ${DEALERSHIP_NAME}.
+
+You are not just writing text replies. You are deciding the best next move for the salesperson based on a normalized lead state and rule-engine signals.
+
+Your priorities:
+- maximize engagement
+- improve appointment set rate
+- improve appointment show rate
+- improve close rate
+- choose the best contact channel next
+- coach the salesperson like a strong internet director or desk manager
+
+Instructions:
+1. Treat the normalized lead state as the source of truth.
+2. Respect the rule signals. Use them as guardrails, not suggestions to ignore.
+3. Prefer the active vehicle and active lead context over historical or lost vehicles.
+4. Keep coaching specific and practical.
+5. Avoid generic "just checking in" language.
+6. If CALL is best, explain the call objective.
+7. If TEXT is best, provide a short text the rep can send.
+8. If EMAIL is best, explain what the email should accomplish.
+9. If WAIT is best, explain what should be monitored before the next action.
+
+Return ONLY valid JSON with this exact shape:
+{
+  "best_next_action": "string",
+  "primary_channel": "TEXT or CALL or EMAIL or WAIT",
+  "why": "string",
+  "manager_coaching": "string",
+  "suggested_text": "string",
+  "suggested_call_objective": "string",
+  "suggested_email_objective": "string",
+  "objections_detected": ["string"],
+  "appointment_opportunity": true,
+  "risk_flags": ["string"],
+  "confidence": 0.0
+}
+`.trim();
+}
+
+function buildV2UserPrompt({
+  leadState,
+  ruleSignals,
+  leadMemory,
+  supplementalLeadDetails,
+}) {
+  const summary = summarizeLeadState(leadState);
+  const conversation = formatConversation(leadState.communications.messages || []);
+
+  return `
+Build the strongest coaching plan for this dealership lead.
+
+Normalized lead state summary:
+${summary || 'No normalized lead summary available.'}
+
+Rule engine signals:
+${JSON.stringify(ruleSignals, null, 2)}
+
+Lead state JSON:
+${JSON.stringify(leadState, null, 2)}
+
+Existing lead memory summary:
+${safeString(leadMemory.summary) || 'None'}
+
+Existing lead memory notes:
+${
+  Array.isArray(leadMemory.notes) && leadMemory.notes.length
+    ? leadMemory.notes.map((note, index) => `${index + 1}. ${note}`).join('\n')
+    : 'None'
+}
+
+Supplemental raw lead details:
+${safeString(supplementalLeadDetails) || 'None'}
+
+Conversation:
+${conversation}
+
+Return only valid JSON.
+`.trim();
+}
+
+function buildV2FallbackPlan({ leadState, ruleSignals, leadMemory }) {
+  const primaryChannel = ruleSignals.suggested_channel || 'TEXT';
+  const primaryVehicle =
+    safeString(leadState.vehicles?.primary?.summary) || 'the vehicle';
+  const customerFirstName =
+    safeString(leadState.customer?.name).split(/\s+/)[0] || 'there';
+  const lastCustomerMessage =
+    safeString(leadState.communications?.last_customer_message);
+
+  const textByChannel = {
+    TEXT: `Hi ${customerFirstName}, I want to make sure I’m helping with the right next step on ${primaryVehicle}. What’s the biggest thing you want answered right now?`,
+    CALL: `Hi ${customerFirstName}, I can help clear this up faster by phone. Are you free for a quick call now or in a few minutes?`,
+    EMAIL: `Hi ${customerFirstName}, I can send a clean summary on ${primaryVehicle}. What details do you want me to make sure are included?`,
+    WAIT: `I’ll stay ready on my side. If anything changes on timing or the vehicle, let me know and I’ll help with the next step.`
+  };
+
+  const whyByChannel = {
+    TEXT: 'There is active engagement or a lightweight clarification is the best next step.',
+    CALL: 'There is enough friction, nuance, or momentum that a call should move the deal forward faster than text.',
+    EMAIL: 'A written summary or documentation follow-up is the cleanest next move.',
+    WAIT: 'The lead appears overworked or timing-sensitive, so a pause is better than forcing another touch.'
+  };
+
+  return normalizeCoachingPlan({
+    best_next_action: `${primaryChannel} the customer next regarding ${primaryVehicle}.`,
+    primary_channel: primaryChannel,
+    why: whyByChannel[primaryChannel] || whyByChannel.TEXT,
+    manager_coaching:
+      primaryChannel === 'CALL'
+        ? `Use the call to clarify the customer's priorities, handle objections directly, and push toward a firm next commitment on ${primaryVehicle}.`
+        : primaryChannel === 'EMAIL'
+        ? `Use email to organize the details cleanly, reduce confusion, and create a strong handoff back into a call or appointment.`
+        : primaryChannel === 'WAIT'
+        ? 'Do not overwork the lead. Watch for the next meaningful engagement signal before re-entering the conversation.'
+        : `Keep the conversation focused on the active vehicle, answer the real question, and move toward a specific next commitment.`,
+    suggested_text: textByChannel[primaryChannel],
+    suggested_call_objective:
+      primaryChannel === 'CALL'
+        ? `Clarify the objection, confirm the right vehicle, and move toward an appointment or commitment on ${primaryVehicle}.`
+        : '',
+    suggested_email_objective:
+      primaryChannel === 'EMAIL'
+        ? `Summarize the key details on ${primaryVehicle} and reduce confusion so the customer can take the next step.`
+        : '',
+    objections_detected: uniqueFallbackItems([
+      /\bprice|payment|fees|trade\b/i.test(lastCustomerMessage)
+        ? 'Price or payment objection'
+        : '',
+    ]),
+    appointment_opportunity: Boolean(ruleSignals.has_appointment_opportunity),
+    risk_flags: uniqueFallbackItems([
+      !safeString(leadState.vehicles?.primary?.summary) ? 'Primary vehicle unclear' : '',
+      !Array.isArray(leadState.communications?.messages) || !leadState.communications.messages.length
+        ? 'Thin communication history'
+        : '',
+    ]),
+    confidence: 0.45,
+    fallback_used: true,
+    lead_memory_summary:
+      safeString(leadMemory.summary) ||
+      summarizeLeadState(leadState),
+  });
+}
+
+function buildV2LeadMemory(existingMemory, leadState, coachingPlan) {
+  const notes = Array.isArray(existingMemory.notes)
+    ? [...existingMemory.notes]
+    : [];
+
+  const additions = uniqueFallbackItems([
+    safeString(leadState.vehicles?.primary?.summary)
+      ? `Primary vehicle: ${safeString(leadState.vehicles.primary.summary)}`
+      : '',
+    safeString(leadState.communications?.last_customer_message)
+      ? `Last customer message: ${safeString(leadState.communications.last_customer_message)}`
+      : '',
+    safeString(coachingPlan.primary_channel)
+      ? `Recommended channel: ${safeString(coachingPlan.primary_channel)}`
+      : '',
+    safeString(coachingPlan.best_next_action)
+      ? `Recommended action: ${safeString(coachingPlan.best_next_action)}`
+      : '',
+  ]);
+
+  for (const note of additions) {
+    if (!notes.some((existing) => safeString(existing).toLowerCase() === note.toLowerCase())) {
+      notes.push(note);
+    }
+  }
+
+  return {
+    summary:
+      safeString(coachingPlan.why) ||
+      safeString(coachingPlan.manager_coaching) ||
+      safeString(existingMemory.summary) ||
+      summarizeLeadState(leadState),
+    notes: notes.slice(-25),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 app.get('/health', (req, res) => {
   res.json({
     ok: true,
@@ -544,6 +809,165 @@ app.post('/analyze-thread', async (req, res) => {
 
     return res.status(error.status || 500).json({
       error: 'Failed to analyze thread.',
+      message: error.message || 'Unknown error',
+      details: error.message || 'Unknown error',
+    });
+  }
+});
+
+app.post('/v2/analyze-lead', async (req, res) => {
+  const leadState = coerceLeadStateFromRequest(req.body);
+  const leadId = safeString(
+    leadState.ids?.lead_id || req.body.leadId || req.body.lead_id
+  );
+  const existingMemory = getLeadMemory(leadId);
+  const ruleSignals = deriveRuleSignals(leadState);
+
+  const supplementalLeadDetails =
+    req.body.leadDetails && typeof req.body.leadDetails === 'object'
+      ? req.body.leadDetails
+      : req.body.lead_details && typeof req.body.lead_details === 'object'
+      ? req.body.lead_details
+      : {
+          lead_details: safeString(req.body.leadDetails || req.body.lead_details),
+          vehicle_info:
+            typeof req.body.vehicleInfo === 'object'
+              ? req.body.vehicleInfo
+              : safeString(req.body.vehicleInfo),
+          status: safeString(req.body.statusValue || req.body.status),
+          process: safeString(req.body.processValue || req.body.process),
+          customer_name: safeString(req.body.customerName || leadState.customer?.name),
+          salesperson_name: safeString(
+            req.body.salespersonName || leadState.assignment?.salesperson
+          ),
+        };
+
+  const fallbackPlan = buildV2FallbackPlan({
+    leadState,
+    ruleSignals,
+    leadMemory: existingMemory,
+  });
+
+  try {
+    const systemPrompt = buildV2SystemPrompt();
+    const userPrompt = buildV2UserPrompt({
+      leadState,
+      ruleSignals,
+      leadMemory: existingMemory,
+      supplementalLeadDetails,
+    });
+
+    const response = await openai.chat.completions.create({
+      model: OPENAI_MODEL,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      response_format: { type: 'json_object' },
+    });
+
+    const rawText = safeString(response.choices?.[0]?.message?.content);
+    let parsedPlan = {};
+
+    try {
+      parsedPlan = rawText ? JSON.parse(rawText) : {};
+    } catch (jsonError) {
+      parsedPlan = parseAnalysisJson(rawText);
+    }
+
+    const coachingPlan = normalizeCoachingPlan({
+      ...fallbackPlan,
+      ...parsedPlan,
+      primary_channel:
+        parsedPlan.primary_channel ||
+        parsedPlan.primaryChannel ||
+        parsedPlan.next_step_channel ||
+        fallbackPlan.primary_channel,
+      appointment_opportunity:
+        parsedPlan.appointment_opportunity !== undefined
+          ? Boolean(parsedPlan.appointment_opportunity)
+          : fallbackPlan.appointment_opportunity,
+      objections_detected:
+        Array.isArray(parsedPlan.objections_detected) ||
+        Array.isArray(parsedPlan.objections)
+          ? parsedPlan.objections_detected || parsedPlan.objections
+          : fallbackPlan.objections_detected,
+      risk_flags: Array.isArray(parsedPlan.risk_flags)
+        ? parsedPlan.risk_flags
+        : fallbackPlan.risk_flags,
+      confidence:
+        Number(parsedPlan.confidence || 0) ||
+        Math.max(Number(fallbackPlan.confidence || 0), 0.75),
+    });
+
+    if (leadId) {
+      const mergedMemory = buildV2LeadMemory(
+        existingMemory,
+        leadState,
+        coachingPlan
+      );
+      setLeadMemory(leadId, mergedMemory);
+
+      return res.json({
+        ok: true,
+        version: 'v2',
+        lead_id: leadId,
+        lead_state: leadState,
+        rule_signals: ruleSignals,
+        coaching_plan: coachingPlan,
+        lead_memory: mergedMemory,
+        fallback_used: false,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      version: 'v2',
+      lead_id: leadId,
+      lead_state: leadState,
+      rule_signals: ruleSignals,
+      coaching_plan: coachingPlan,
+      lead_memory: existingMemory,
+      fallback_used: false,
+    });
+  } catch (error) {
+    console.error('Analyze lead v2 error:', error);
+
+    if (isQuotaError(error)) {
+      if (leadId) {
+        const mergedMemory = buildV2LeadMemory(
+          existingMemory,
+          leadState,
+          fallbackPlan
+        );
+        setLeadMemory(leadId, mergedMemory);
+
+        return res.json({
+          ok: true,
+          version: 'v2',
+          lead_id: leadId,
+          lead_state: leadState,
+          rule_signals: ruleSignals,
+          coaching_plan: fallbackPlan,
+          lead_memory: mergedMemory,
+          fallback_used: true,
+        });
+      }
+
+      return res.json({
+        ok: true,
+        version: 'v2',
+        lead_id: leadId,
+        lead_state: leadState,
+        rule_signals: ruleSignals,
+        coaching_plan: fallbackPlan,
+        lead_memory: existingMemory,
+        fallback_used: true,
+      });
+    }
+
+    return res.status(error.status || 500).json({
+      error: 'Failed to analyze lead.',
       message: error.message || 'Unknown error',
       details: error.message || 'Unknown error',
     });
