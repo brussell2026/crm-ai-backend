@@ -326,27 +326,32 @@ function buildFallbackAnalysis({
   const language = detectConversationLanguage(messages, leadDetails);
   const replies = buildFallbackReplies(lastCustomerMessage, customerName);
   const hasRecentCustomerMessage = !!safeString(lastCustomerMessage);
+  const normalizedLeadDetails = safeString(leadDetails);
+  const contactAlreadyMade = /\bContacted:\s*Yes\b/i.test(normalizedLeadDetails) || /\bPhone Contact:\s*Yes\b/i.test(normalizedLeadDetails) || /\bText Conversation:\s*Yes\b/i.test(normalizedLeadDetails);
+  const activeConversation = hasRecentCustomerMessage || contactAlreadyMade;
   const vehicleSummary = safeString(vehicleInfo) || 'Vehicle details are limited.';
   const memorySummary =
     safeString(existingMemory.summary) ||
     `Fallback analysis used because OpenAI quota is currently unavailable. Vehicle: ${vehicleSummary}`;
 
   return {
-    buyer_type: hasRecentCustomerMessage ? 'Active shopper' : 'New inquiry',
-    deal_stage: hasRecentCustomerMessage ? 'Conversation in progress' : 'Initial contact',
-    best_next_action: hasRecentCustomerMessage
+    buyer_type: activeConversation ? 'Active shopper' : 'New inquiry',
+    deal_stage: activeConversation ? 'Conversation in progress' : 'Initial contact',
+    best_next_action: activeConversation
       ? 'TEXT the customer back with a clarifying question tied to the exact vehicle or numbers they mentioned.'
       : 'TEXT the customer with a strong opening message and identify the exact vehicle of interest.',
     next_step_channel: 'TEXT',
     next_step_reason:
-      'OpenAI quota is unavailable, so a local fallback is guiding the next step based on the latest visible conversation.',
+      'OpenAI quota is unavailable, so a local fallback is guiding the next step based on the visible CRM lead details and recent conversation evidence.',
     strategy:
-      'Acknowledge the customer’s point, tighten the conversation around the exact truck or number they mentioned, and avoid broad back-and-forth until the vehicle and ask are confirmed.',
+      activeConversation
+        ? 'This is not a fresh lead. Continue from the existing relationship, acknowledge the prior contact, tighten the conversation around the exact truck or commitment, and avoid restarting discovery from scratch.'
+        : 'Acknowledge the customer’s point, tighten the conversation around the exact truck or number they mentioned, and avoid broad back-and-forth until the vehicle and ask are confirmed.',
     recommended_reply: replies[0],
     recommended_reply_2: replies[1],
     recommended_reply_3: replies[2],
     conversation_language: language,
-    customer_sentiment: hasRecentCustomerMessage ? 'Engaged' : 'Unknown',
+    customer_sentiment: activeConversation ? 'Engaged' : 'Unknown',
     hot_points: uniqueFallbackItems([
       safeString(lastCustomerMessage) ? `Latest customer message: ${safeString(lastCustomerMessage)}` : '',
       safeString(vehicleInfo) ? `Vehicle context: ${safeString(vehicleInfo)}` : '',
