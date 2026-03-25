@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 
 const express = require('express');
 const cors = require('cors');
@@ -11,6 +11,7 @@ app.use(express.json({ limit: '2mb' }));
 
 const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 if (!OPENAI_API_KEY) {
   console.error('Missing OPENAI_API_KEY environment variable.');
@@ -122,6 +123,56 @@ function parseAnalysisJson(text) {
     throw err;
   }
 }
+
+const ANALYSIS_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: [
+    'buyer_type',
+    'deal_stage',
+    'best_next_action',
+    'next_step_channel',
+    'next_step_reason',
+    'strategy',
+    'recommended_reply',
+    'recommended_reply_2',
+    'recommended_reply_3',
+    'conversation_language',
+    'customer_sentiment',
+    'hot_points',
+    'objections',
+    'appointment_opportunity',
+    'memory_summary',
+    'memory_updates',
+  ],
+  properties: {
+    buyer_type: { type: 'string' },
+    deal_stage: { type: 'string' },
+    best_next_action: { type: 'string' },
+    next_step_channel: { type: 'string' },
+    next_step_reason: { type: 'string' },
+    strategy: { type: 'string' },
+    recommended_reply: { type: 'string' },
+    recommended_reply_2: { type: 'string' },
+    recommended_reply_3: { type: 'string' },
+    conversation_language: { type: 'string' },
+    customer_sentiment: { type: 'string' },
+    hot_points: {
+      type: 'array',
+      items: { type: 'string' },
+    },
+    objections: {
+      type: 'array',
+      items: { type: 'string' },
+    },
+    appointment_opportunity: { type: 'boolean' },
+    memory_summary: { type: 'string' },
+    memory_updates: {
+      type: 'array',
+      items: { type: 'string' },
+    },
+  },
+};
 
 function buildSystemPrompt() {
   return `
@@ -348,17 +399,17 @@ app.post('/analyze-thread', async (req, res) => {
     });
 
     const response = await openai.responses.create({
-      model: 'gpt-5.4',
-      input: [
-        {
-          role: 'system',
-          content: systemPrompt,
+      model: OPENAI_MODEL,
+      instructions: systemPrompt,
+      input: userPrompt,
+      text: {
+        format: {
+          type: 'json_schema',
+          name: 'lead_analysis',
+          schema: ANALYSIS_SCHEMA,
+          strict: true,
         },
-        {
-          role: 'user',
-          content: userPrompt,
-        },
-      ],
+      },
     });
 
     const rawText = safeString(response.output_text);
@@ -408,5 +459,5 @@ app.use((req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`CRM AI backend running on port ${PORT}`);
+  console.log(`CRM AI backend running on port ${PORT} with model ${OPENAI_MODEL}`);
 });
