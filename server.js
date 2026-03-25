@@ -439,6 +439,40 @@ function getSnapshotEvents(snapshotInput = {}) {
   }));
 }
 
+function getSnapshotSections(snapshotInput = {}) {
+  const sections = snapshotInput.sections || snapshotInput.snapshot_sections || {};
+  return {
+    customer_header_text: safeString(
+      sections.customer_header_text || sections.customerHeaderText
+    ),
+    recent_activity_text: safeString(
+      sections.recent_activity_text || sections.recentActivityText
+    ),
+    sales_history_text: safeString(
+      sections.sales_history_text || sections.salesHistoryText
+    ),
+    lead_info_text: safeString(
+      sections.lead_info_text || sections.leadInfoText
+    ),
+    vehicle_info_text: safeString(
+      sections.vehicle_info_text || sections.vehicleInfoText
+    ),
+    notes_history_text: safeString(
+      sections.notes_history_text || sections.notesHistoryText
+    ),
+  };
+}
+
+function getSnapshotSalesRows(snapshotInput = {}) {
+  return safeArray(snapshotInput.sales_rows || snapshotInput.salesRows).map((row) => ({
+    status: safeString(row.status),
+    created: safeString(row.created),
+    source: safeString(row.source),
+    vehicle: safeString(row.vehicle),
+    row_text: safeString(row.row_text || row.rowText),
+  }));
+}
+
 function snapshotEventText(event) {
   return [event.url, event.path, event.body_snippet, event.request_body_snippet]
     .map((value) => safeString(value))
@@ -446,12 +480,82 @@ function snapshotEventText(event) {
     .join('\n');
 }
 
-function buildSnapshotVehicleCandidates(events = []) {
+function extractVehicleLinesFromSnapshotText(text = '') {
+  const makePattern =
+    /\b(Chevrolet|Ford|GMC|Buick|Cadillac|Toyota|Honda|Nissan|Jeep|Ram|Dodge|Hyundai|Kia|Subaru|Volkswagen|BMW|Mercedes|Audi|Lexus|Mazda|Chrysler|Lincoln|Volvo|Porsche|Acura|Infiniti|Mitsubishi|Tesla|Genesis)\b/i;
+  const typePattern =
+    /\b(Trax|Traverse|Tahoe|Suburban|Silverado|Colorado|Blazer|Equinox|Explorer|Expedition|Camry|Corolla|Civic|Accord|Ranger|Sierra|F-150|2500HD|1500|SUV|Pickup|Sport Utility|Crew Cab|Double Cab|Regular Cab)\b/i;
+
+  return uniqueStrings(
+    safeString(text)
+      .split(/\n|\|/)
+      .map((line) => safeString(line))
+      .filter(Boolean)
+      .filter((line) => /\b(?:19|20)\d{2}\b/.test(line))
+      .filter((line) => makePattern.test(line) || typePattern.test(line))
+      .filter(
+        (line) =>
+          !(
+            /\b(?:dr|drive|rd|road|st|street|ave|avenue|blvd|boulevard|cir|circle|ct|court|ln|lane|apt|suite)\b/i.test(
+              line
+            ) && !makePattern.test(line)
+          )
+      )
+    );
+}
+
+function buildSnapshotVehicleCandidates({
+  events = [],
+  sections = {},
+  salesRows = [],
+} = {}) {
   const makePattern =
     /\b(Chevrolet|Ford|GMC|Buick|Cadillac|Toyota|Honda|Nissan|Jeep|Ram|Dodge|Hyundai|Kia|Subaru|Volkswagen|BMW|Mercedes|Audi|Lexus|Mazda|Chrysler|Lincoln|Volvo|Porsche|Acura|Infiniti|Mitsubishi)\b/i;
   const typePattern =
     /\b(Trax|Traverse|Tahoe|Suburban|Silverado|Colorado|Blazer|Equinox|Explorer|Expedition|Camry|Corolla|Civic|Accord|Ranger|Sierra|F-150|2500HD|1500|SUV|Pickup|Sport Utility)\b/i;
   const candidates = [];
+
+  const addCandidate = (line, score, source) => {
+    const cleaned = safeString(line).replace(/\s+/g, ' ').trim();
+    if (!cleaned) return;
+
+    const existing = candidates.find(
+      (candidate) => candidate.line.toLowerCase() === cleaned.toLowerCase()
+    );
+    if (existing) {
+      existing.score = Math.max(existing.score, score);
+      existing.source = existing.source || source;
+      return;
+    }
+
+    candidates.push({
+      line: cleaned.slice(0, 240),
+      score,
+      source: safeString(source),
+    });
+  };
+
+  extractVehicleLinesFromSnapshotText(sections.vehicle_info_text).forEach((line, index) => {
+    addCandidate(line, 140 - index * 5, 'vehicle_info_text');
+  });
+
+  safeArray(salesRows).forEach((row, index) => {
+    const status = safeString(row.status);
+    const score = /\bactive\b/i.test(status)
+      ? 110 - index
+      : /\b(lost|duplicate|sold|delivered)\b/i.test(status)
+      ? 45 - index
+      : 80 - index;
+    addCandidate(row.vehicle || row.row_text, score, 'sales_row');
+  });
+
+  extractVehicleLinesFromSnapshotText(sections.sales_history_text).forEach((line, index) => {
+    addCandidate(line, 70 - index, 'sales_history_text');
+  });
+
+  extractVehicleLinesFromSnapshotText(sections.customer_header_text).forEach((line, index) => {
+    addCandidate(line, 20 - index, 'customer_header_text');
+  });
 
   for (const event of safeArray(events)) {
     const lines = uniqueStrings(
@@ -475,44 +579,75 @@ function buildSnapshotVehicleCandidates(events = []) {
       if (/\bstock|vin|color|location|pickup|sport utility|crew cab|lt|premier|custom\b/i.test(line)) score += 2;
       if (/CustomerDashboard|CarDashboard|vinconnect/i.test(event.url) || /CustomerDashboard|CarDashboard|vinconnect/i.test(event.path)) score += 2;
 
-      candidates.push({
-        line: line.slice(0, 240),
-        score,
-      });
+      addCandidate(line, score + 15, 'network_event');
     }
   }
 
   return candidates
     .sort((a, b) => b.score - a.score)
-    .filter((candidate, index, array) =>
-      array.findIndex((item) => item.line.toLowerCase() === candidate.line.toLowerCase()) === index
+    .filter(
+      (candidate, index, array) =>
+        array.findIndex(
+          (item) => item.line.toLowerCase() === candidate.line.toLowerCase()
+        ) === index
     );
 }
 
 function extractSnapshotLeadState(snapshotInput = {}) {
   const events = getSnapshotEvents(snapshotInput);
-  const combinedText = events.map(snapshotEventText).join('\n');
-  const vehicleCandidates = buildSnapshotVehicleCandidates(events);
+  const sections = getSnapshotSections(snapshotInput);
+  const salesRows = getSnapshotSalesRows(snapshotInput);
+  const sectionText = Object.values(sections).filter(Boolean).join('\n');
+  const combinedText = [sectionText, ...events.map(snapshotEventText)]
+    .filter(Boolean)
+    .join('\n');
+  const vehicleCandidates = buildSnapshotVehicleCandidates({
+    events,
+    sections,
+    salesRows,
+  });
   const topVehicle = safeString(vehicleCandidates[0]?.line);
+  const activeSalesRow =
+    salesRows.find((row) => /\bactive\b/i.test(safeString(row.status))) || salesRows[0] || {};
   const leadSource =
     safeString(
+      safeString((sections.lead_info_text.match(/\bSource\s*:?\s*([^\n]+)/i) || [])[1]) ||
+        safeString(activeSalesRow.source) ||
       (combinedText.match(
         /\b(?:Di\s*-\s*[A-Za-z0-9 .-]+|700Credit\.Com|Cargurus|Cars\.com|Carfax, Inc|AutoTrader\.com|Dealers?\s+WebSite|Wholesale|Internet|Phone|Walk In|GM 3rd Party|Social\s*-\s*Facebook\/Instagram\/Etc)\b/i
       ) || [])[0]
     ) || '';
   const status =
     safeString(
+      safeString((sections.lead_info_text.match(/\bStatus\s*:?\s*([^\n]+)/i) || [])[1]) ||
+        safeString(activeSalesRow.status) ||
       (combinedText.match(
         /\b(Waiting for Prospect Response|Waiting for response|Active|Duplicate|Sold|Lost|Bad|Delivered|New Lead)\b/i
       ) || [])[0]
     ) || '';
   const contacted =
+    safeString((sections.lead_info_text.match(/\bContacted\s*:\s*(Yes|No[^\n]*)/i) || [])[1]) ||
     safeString((combinedText.match(/\bContacted\s*:\s*(Yes|No[^\n]*)/i) || [])[1]) ||
     (/recent text\/call activity detected|text conversation/i.test(combinedText) ? 'Yes' : '');
-  const attempted =
-    safeString((combinedText.match(/\bAttempted\s*:\s*([^\n]+)/i) || [])[1]) || '';
-  const phoneCallDetected = /phone call|voicemail|no contact/i.test(combinedText);
-  const textDetected = /text message|sms|reply received/i.test(combinedText);
+  const attempted = safeString(
+    (sections.lead_info_text.match(/\bAttempted\s*:\s*([^\n]+)/i) || [])[1] ||
+      (combinedText.match(/\bAttempted\s*:\s*([^\n]+)/i) || [])[1]
+  );
+  const phoneCallDetected = /phone call|voicemail|no contact|duration:\d{1,2}:\d{2}/i.test(
+    combinedText
+  );
+  const textDetected = /text message|sms|reply received|inbound text|outbound text/i.test(
+    combinedText
+  );
+  const noteLines = uniqueStrings(
+    [
+      ...safeString(sections.notes_history_text).split('\n'),
+      ...safeString(sections.recent_activity_text).split('\n'),
+    ]
+      .map((line) => safeString(line))
+      .filter(Boolean)
+  ).slice(0, 12);
+  const sectionCount = Object.values(sections).filter(Boolean).length;
 
   return {
     vehicles: {
@@ -537,27 +672,39 @@ function extractSnapshotLeadState(snapshotInput = {}) {
       ]),
       calls: phoneCallDetected ? ['CRM snapshot detected phone call history'] : [],
       texts: textDetected ? ['CRM snapshot detected text history'] : [],
-      notes: events
-        .filter((event) => safeString(event.body_snippet))
-        .slice(0, 10)
-        .map((event) =>
-          [safeString(event.method), safeString(event.status), safeString(event.path || event.url)]
-            .filter(Boolean)
-            .join(' ')
-        ),
+      notes: uniqueStrings([
+        ...noteLines,
+        ...events
+          .filter((event) => safeString(event.body_snippet))
+          .slice(0, 10)
+          .map((event) =>
+            [safeString(event.method), safeString(event.status), safeString(event.path || event.url)]
+              .filter(Boolean)
+              .join(' ')
+          ),
+      ]),
     },
     opportunity: {
       risk_flags: uniqueStrings([
-        !events.length ? 'No CRM snapshot events captured' : '',
-        !topVehicle && events.length ? 'CRM snapshot missing primary vehicle' : '',
+        !events.length && !sectionCount ? 'No CRM snapshot data captured' : '',
+        !topVehicle && (events.length || sectionCount) ? 'CRM snapshot missing primary vehicle' : '',
       ]),
     },
     meta: {
-      captured_from: events.length ? ['crm-snapshot'] : [],
-      data_quality: events.some((event) => safeString(event.body_snippet)) ? 'high' : events.length ? 'medium' : '',
+      captured_from: uniqueStrings([
+        events.length ? 'crm-snapshot-events' : '',
+        sectionCount ? 'crm-snapshot-sections' : '',
+      ]),
+      data_quality:
+        topVehicle && sectionCount
+          ? 'high'
+          : events.some((event) => safeString(event.body_snippet)) || sectionCount
+          ? 'medium'
+          : '',
     },
     snapshot: {
       event_count: events.length,
+      section_count: sectionCount,
       vehicle_candidates: vehicleCandidates.slice(0, 6),
     },
   };
