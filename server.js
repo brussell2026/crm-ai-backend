@@ -857,6 +857,9 @@ Instructions:
 
 Return ONLY valid JSON with this exact shape:
 {
+  "playbook": "string",
+  "priority": "string",
+  "primary_goal": "string",
   "best_next_action": "string",
   "primary_channel": "TEXT or CALL or EMAIL or WAIT",
   "why": "string",
@@ -1005,6 +1008,192 @@ function buildV2LeadMemory(existingMemory, leadState, coachingPlan) {
 
   return {
     summary:
+      safeString(coachingPlan.why) ||
+      safeString(coachingPlan.manager_coaching) ||
+      safeString(existingMemory.summary) ||
+      summarizeLeadState(leadState),
+    notes: notes.slice(-25),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function buildV2FallbackPlan({ leadState, ruleSignals, leadMemory }) {
+  const primaryChannel = safeString(ruleSignals.suggested_channel || 'TEXT').toUpperCase();
+  const playbook = safeString(ruleSignals.playbook) || 'ENGAGED_TEXT_THREAD';
+  const priority = safeString(ruleSignals.priority) || 'MEDIUM';
+  const primaryGoal =
+    safeString(ruleSignals.primary_goal) ||
+    'Move the lead to the next meaningful commitment.';
+  const primaryVehicle =
+    safeString(leadState.vehicles?.primary?.summary) || 'the vehicle';
+  const customerFirstName =
+    safeString(leadState.customer?.name).split(/\s+/)[0] || 'there';
+  const lastCustomerMessage =
+    safeString(leadState.communications?.last_customer_message);
+  const salesperson =
+    safeString(leadState.assignment?.salesperson) || 'the assigned rep';
+
+  const channelText = {
+    TEXT: `Hi ${customerFirstName}, I want to make sure I'm helping with the right next step on ${primaryVehicle}. What's the biggest thing you want answered right now?`,
+    CALL: `Hi ${customerFirstName}, I can help clear this up faster by phone. Are you free for a quick call now or in a few minutes?`,
+    EMAIL: `Hi ${customerFirstName}, I can send a clean summary on ${primaryVehicle}. What details do you want me to make sure are included?`,
+    WAIT: `I'll stay ready on my side. If anything changes on timing or the vehicle, let me know and I'll help with the next step.`
+  };
+
+  let why =
+    'There is active engagement or a lightweight clarification is the best next step.';
+  let managerCoaching =
+    `Keep the conversation focused on ${primaryVehicle}, answer the real question, and move toward a specific next commitment.`;
+  let suggestedText = channelText[primaryChannel] || channelText.TEXT;
+  let suggestedCallObjective = '';
+  let suggestedEmailObjective = '';
+
+  switch (playbook) {
+    case 'APPOINTMENT_RECOVERY':
+      why =
+        'The lead already had momentum, so the best move is recovering the missed or canceled appointment quickly.';
+      managerCoaching =
+        `Coach ${salesperson} to acknowledge the disruption, offer two concrete appointment options, and make it easy for the customer to recommit on ${primaryVehicle}.`;
+      suggestedText = `Hi ${customerFirstName}, I know the appointment got thrown off. I still have ${primaryVehicle} in mind for you. Would later today or tomorrow work better to get you back in?`;
+      suggestedCallObjective =
+        `Recover the missed appointment, confirm timing, and leave the call with a firm visit plan on ${primaryVehicle}.`;
+      break;
+    case 'IDENTITY_RESET':
+      why =
+        'Trust needs to be rebuilt before the conversation will move forward cleanly.';
+      managerCoaching =
+        `Have ${salesperson} reintroduce themselves clearly, name the dealership, reference the exact lead source, and then re-anchor around ${primaryVehicle}.`;
+      suggestedText = `Hi ${customerFirstName}, this is ${salesperson} with the dealership following up on your interest in ${primaryVehicle}. I want to make sure I'm helping with the right vehicle and next step.`;
+      break;
+    case 'OBJECTION_CLARIFICATION':
+      why =
+        'There is enough friction around pricing, trade, or comparison shopping that a live conversation should move the deal faster than back-and-forth text.';
+      managerCoaching =
+        `Use a live call to isolate the real objection, protect gross where possible, and move the customer toward an appointment instead of negotiating in circles.`;
+      suggestedText = `Hi ${customerFirstName}, I can help clear up the details on ${primaryVehicle} faster by phone than by text. Are you available for a quick call?`;
+      suggestedCallObjective =
+        `Clarify whether the issue is price, trade, payment, or comparison shopping, and move toward an appointment on ${primaryVehicle}.`;
+      break;
+    case 'PRODUCT_CONFIRMATION':
+      why =
+        'The customer is asking specific product questions, so answering the exact question should earn the next commitment.';
+      managerCoaching =
+        `Coach ${salesperson} to answer the exact question first, avoid generic filler, and then convert that clarity into an appointment or next step on ${primaryVehicle}.`;
+      suggestedText = `Hi ${customerFirstName}, yes, I can help with the exact details on ${primaryVehicle}. The biggest thing to confirm next is what matters most to you before you come in.`;
+      break;
+    case 'REVIVE_STALLED_LEAD':
+      why =
+        'The lead looks stalled, so the next touch should be short, low-friction, and easy to answer.';
+      managerCoaching =
+        `Keep the outreach short, specific, and centered on whether ${primaryVehicle} is still the right fit instead of pushing too hard too early.`;
+      suggestedText = `Hi ${customerFirstName}, I wanted to circle back on ${primaryVehicle}. Is this still the right vehicle for what you're trying to accomplish?`;
+      break;
+    case 'DOCUMENTED_FOLLOW_UP':
+      why =
+        'A clean written follow-up is the best way to organize the details before the next live conversation.';
+      managerCoaching =
+        `Use email to reduce confusion, summarize the key facts on ${primaryVehicle}, and create a reason for the customer to reply or schedule the next live touch.`;
+      suggestedText = `Hi ${customerFirstName}, I can send you a clean summary on ${primaryVehicle} so everything is in one place. I just want to make sure I include the details you care about most.`;
+      suggestedEmailObjective =
+        `Summarize the key facts on ${primaryVehicle}, reduce confusion, and create a reason for the customer to reply or schedule the next live touch.`;
+      break;
+    case 'NEW_LEAD_OPENER':
+      why =
+        'The lead needs a clear first move that confirms the right vehicle and starts momentum cleanly.';
+      managerCoaching =
+        `Open with confidence, confirm that ${primaryVehicle} is still the right fit, and guide the customer toward a real response or appointment.`;
+      suggestedText = `Hi ${customerFirstName}, this is ${salesperson}. I'm reaching out about ${primaryVehicle} and want to make sure I help with the right next step for you.`;
+      break;
+    case 'ENGAGED_TEXT_THREAD':
+    default:
+      why =
+        'The lead is actively engaging, so the best move is to keep momentum and convert it into a commitment.';
+      managerCoaching =
+        `Keep the conversation focused on ${primaryVehicle}, answer the real question, and move toward a specific next commitment.`;
+      break;
+  }
+
+  if (primaryChannel === 'CALL' && !suggestedCallObjective) {
+    suggestedCallObjective =
+      `Clarify the customer's priorities, confirm the right vehicle, and move toward an appointment or commitment on ${primaryVehicle}.`;
+  }
+
+  if (primaryChannel === 'EMAIL' && !suggestedEmailObjective) {
+    suggestedEmailObjective =
+      `Summarize the key details on ${primaryVehicle} and reduce confusion so the customer can take the next step.`;
+  }
+
+  return normalizeCoachingPlan({
+    playbook,
+    priority,
+    primary_goal: primaryGoal,
+    best_next_action: `${primaryChannel} the customer next regarding ${primaryVehicle}.`,
+    primary_channel: primaryChannel,
+    why,
+    manager_coaching: managerCoaching,
+    suggested_text: suggestedText,
+    suggested_call_objective: suggestedCallObjective,
+    suggested_email_objective: suggestedEmailObjective,
+    objections_detected: uniqueFallbackItems([
+      ...safeArray(ruleSignals.objections_detected),
+      /\bprice|payment|fees|trade\b/i.test(lastCustomerMessage)
+        ? 'Price or payment objection'
+        : '',
+    ]),
+    appointment_opportunity: Boolean(ruleSignals.has_appointment_opportunity),
+    risk_flags: uniqueFallbackItems([
+      ...safeArray(ruleSignals.risk_flags),
+      !safeString(leadState.vehicles?.primary?.summary) ? 'Primary vehicle unclear' : '',
+      !Array.isArray(leadState.communications?.messages) || !leadState.communications.messages.length
+        ? 'Thin communication history'
+        : '',
+    ]),
+    confidence: 0.45,
+    fallback_used: true,
+    lead_memory_summary:
+      safeString(leadMemory.summary) ||
+      summarizeLeadState(leadState),
+  });
+}
+
+function buildV2LeadMemory(existingMemory, leadState, coachingPlan) {
+  const notes = Array.isArray(existingMemory.notes)
+    ? [...existingMemory.notes]
+    : [];
+
+  const additions = uniqueFallbackItems([
+    safeString(coachingPlan.playbook)
+      ? `Playbook: ${safeString(coachingPlan.playbook)}`
+      : '',
+    safeString(coachingPlan.priority)
+      ? `Priority: ${safeString(coachingPlan.priority)}`
+      : '',
+    safeString(coachingPlan.primary_goal)
+      ? `Primary goal: ${safeString(coachingPlan.primary_goal)}`
+      : '',
+    safeString(leadState.vehicles?.primary?.summary)
+      ? `Primary vehicle: ${safeString(leadState.vehicles.primary.summary)}`
+      : '',
+    safeString(leadState.communications?.last_customer_message)
+      ? `Last customer message: ${safeString(leadState.communications.last_customer_message)}`
+      : '',
+    safeString(coachingPlan.primary_channel)
+      ? `Recommended channel: ${safeString(coachingPlan.primary_channel)}`
+      : '',
+    safeString(coachingPlan.best_next_action)
+      ? `Recommended action: ${safeString(coachingPlan.best_next_action)}`
+      : '',
+  ]);
+
+  for (const note of additions) {
+    if (!notes.some((existing) => safeString(existing).toLowerCase() === note.toLowerCase())) {
+      notes.push(note);
+    }
+  }
+
+  return {
+    summary:
+      safeString(coachingPlan.primary_goal) ||
       safeString(coachingPlan.why) ||
       safeString(coachingPlan.manager_coaching) ||
       safeString(existingMemory.summary) ||
@@ -1237,11 +1426,37 @@ app.post('/v2/analyze-lead', async (req, res) => {
     const coachingPlan = normalizeCoachingPlan({
       ...fallbackPlan,
       ...parsedPlan,
+      playbook:
+        safeString(parsedPlan.playbook || parsedPlan.coaching_playbook) ||
+        fallbackPlan.playbook,
+      priority:
+        safeString(parsedPlan.priority) || fallbackPlan.priority,
+      primary_goal:
+        safeString(parsedPlan.primary_goal || parsedPlan.primaryGoal) ||
+        fallbackPlan.primary_goal,
+      best_next_action:
+        safeString(parsedPlan.best_next_action || parsedPlan.bestNextAction) ||
+        fallbackPlan.best_next_action,
       primary_channel:
         parsedPlan.primary_channel ||
         parsedPlan.primaryChannel ||
         parsedPlan.next_step_channel ||
         fallbackPlan.primary_channel,
+      why:
+        safeString(parsedPlan.why || parsedPlan.next_step_reason) ||
+        fallbackPlan.why,
+      manager_coaching:
+        safeString(parsedPlan.manager_coaching || parsedPlan.strategy) ||
+        fallbackPlan.manager_coaching,
+      suggested_text:
+        safeString(parsedPlan.suggested_text || parsedPlan.recommended_reply) ||
+        fallbackPlan.suggested_text,
+      suggested_call_objective:
+        safeString(parsedPlan.suggested_call_objective) ||
+        fallbackPlan.suggested_call_objective,
+      suggested_email_objective:
+        safeString(parsedPlan.suggested_email_objective) ||
+        fallbackPlan.suggested_email_objective,
       appointment_opportunity:
         parsedPlan.appointment_opportunity !== undefined
           ? Boolean(parsedPlan.appointment_opportunity)

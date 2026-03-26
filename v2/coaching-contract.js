@@ -28,6 +28,9 @@ function dedupeStrings(values) {
 
 function createEmptyCoachingPlan() {
   return {
+    playbook: '',
+    priority: '',
+    primary_goal: '',
     best_next_action: '',
     primary_channel: '',
     why: '',
@@ -47,6 +50,9 @@ function normalizeCoachingPlan(input = {}) {
   return {
     ...base,
     ...input,
+    playbook: safeString(input.playbook || input.coaching_playbook),
+    priority: safeString(input.priority),
+    primary_goal: safeString(input.primary_goal || input.primaryGoal),
     best_next_action: safeString(input.best_next_action || input.bestNextAction),
     primary_channel: normalizeChannel(input.primary_channel || input.primaryChannel || input.next_step_channel),
     why: safeString(input.why || input.next_step_reason),
