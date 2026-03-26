@@ -114,6 +114,21 @@ function deriveRuleSignals(stateInput = {}) {
       /\bno show\b/i,
       /\bcome in for an appt\b/i
     ]),
+    appointment_confirmed: containsAny(objectionText, [
+      /\bcoming tomorrow\b/i,
+      /\bcoming today\b/i,
+      /\bcome tomorrow\b/i,
+      /\bcome today\b/i,
+      /\bbetween\s+\d{1,2}(?::\d{2})?\s*(?:-|to)\s*\d{1,2}(?::\d{2})?\b/i,
+      /\b(?:tomorrow|today|saturday|monday|tuesday|wednesday|thursday|friday|sunday)\s+between\b/i,
+      /\bon my way\b/i,
+      /\bsee you tomorrow\b/i,
+      /\bsee you then\b/i,
+      /\bappointment confirmed\b/i,
+      /\bconfirmed appointment\b/i,
+      /\bwill be there\b/i,
+      /\bbe there at\b/i
+    ]),
     has_appointment_opportunity: containsAny(objectionText, [
       /\bcome in\b/i,
       /\btoday\b/i,
@@ -149,6 +164,7 @@ function deriveRuleSignals(stateInput = {}) {
   ]);
 
   signals.risk_flags = uniqueStrings([
+    signals.appointment_confirmed ? 'Appointment appears scheduled' : '',
     signals.appointment_recovery_needed ? 'Appointment recovery needed' : '',
     signals.has_competitive_shopping ? 'Customer comparing other inventory' : '',
     signals.is_stale ? 'Lead lacks meaningful response history' : '',
@@ -156,7 +172,13 @@ function deriveRuleSignals(stateInput = {}) {
     !signals.has_vehicle_context ? 'Primary vehicle unclear' : ''
   ]);
 
-  if (signals.appointment_recovery_needed) {
+  if (signals.appointment_confirmed && !signals.appointment_recovery_needed) {
+    signals.playbook = 'APPOINTMENT_CONFIRMATION';
+    signals.priority = 'HOT';
+    signals.primary_goal = 'Confirm the scheduled visit, protect the appointment, and reduce no-show risk.';
+    signals.suggested_channel =
+      signals.has_recent_text_engagement && !signals.has_phone_history ? 'TEXT' : 'CALL';
+  } else if (signals.appointment_recovery_needed) {
     signals.playbook = 'APPOINTMENT_RECOVERY';
     signals.priority = 'HOT';
     signals.primary_goal = 'Recover the appointment and get a firm reschedule or commitment.';

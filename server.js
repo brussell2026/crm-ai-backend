@@ -850,10 +850,11 @@ Instructions:
 3. Prefer the active vehicle and active lead context over historical or lost vehicles.
 4. Keep coaching specific and practical.
 5. Avoid generic "just checking in" language.
-6. If CALL is best, explain the call objective.
-7. If TEXT is best, provide a short text the rep can send.
-8. If EMAIL is best, explain what the email should accomplish.
-9. If WAIT is best, explain what should be monitored before the next action.
+6. If rule signals indicate the appointment is already scheduled or confirmed, prioritize appointment confirmation and show-rate coaching over objection handling.
+7. If CALL is best, explain the call objective.
+8. If TEXT is best, provide a short text the rep can send.
+9. If EMAIL is best, explain what the email should accomplish.
+10. If WAIT is best, explain what should be monitored before the next action.
 
 Return ONLY valid JSON with this exact shape:
 {
@@ -1049,6 +1050,17 @@ function buildV2FallbackPlan({ leadState, ruleSignals, leadMemory }) {
   let suggestedEmailObjective = '';
 
   switch (playbook) {
+    case 'APPOINTMENT_CONFIRMATION':
+      why =
+        'The customer already appears scheduled, so the best move is confirming the appointment details and protecting the show.';
+      managerCoaching =
+        `Coach ${salesperson} to confirm the exact day and time, reinforce the value of the visit, and reduce no-show risk without reopening unnecessary negotiation on ${primaryVehicle}.`;
+      suggestedText = `Hi ${customerFirstName}, I have you penciled in for ${primaryVehicle}. I just want to confirm we are still set for tomorrow between 10 and 11 and make sure you have everything you need before you head in.`;
+      suggestedCallObjective =
+        `Confirm the appointment window, verify the customer is still coming, and remove any last-minute friction that could cause a no-show on ${primaryVehicle}.`;
+      suggestedEmailObjective =
+        `Confirm the appointment details in writing, restate the vehicle, and make the visit feel easy to keep.`;
+      break;
     case 'APPOINTMENT_RECOVERY':
       why =
         'The lead already had momentum, so the best move is recovering the missed or canceled appointment quickly.';
@@ -1473,6 +1485,24 @@ app.post('/v2/analyze-lead', async (req, res) => {
         Number(parsedPlan.confidence || 0) ||
         Math.max(Number(fallbackPlan.confidence || 0), 0.75),
     });
+
+    if (ruleSignals.appointment_confirmed && !ruleSignals.appointment_recovery_needed) {
+      coachingPlan.playbook = fallbackPlan.playbook;
+      coachingPlan.priority = fallbackPlan.priority;
+      coachingPlan.primary_goal = fallbackPlan.primary_goal;
+      coachingPlan.best_next_action = fallbackPlan.best_next_action;
+      coachingPlan.primary_channel = fallbackPlan.primary_channel;
+      coachingPlan.why = fallbackPlan.why;
+      coachingPlan.manager_coaching = fallbackPlan.manager_coaching;
+      coachingPlan.suggested_text = fallbackPlan.suggested_text;
+      coachingPlan.suggested_call_objective = fallbackPlan.suggested_call_objective;
+      coachingPlan.suggested_email_objective = fallbackPlan.suggested_email_objective;
+      coachingPlan.appointment_opportunity = true;
+      coachingPlan.risk_flags = uniqueFallbackItems([
+        ...safeArray(coachingPlan.risk_flags),
+        'Appointment appears scheduled',
+      ]);
+    }
 
     if (leadId) {
       const mergedMemory = buildV2LeadMemory(
